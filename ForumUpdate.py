@@ -5,9 +5,9 @@ import time
 from pathlib import Path
 
 # === osu! API Setup ===
-client_id = 
-client_secret = ""
-callback_url = "http://localhost:8727"
+client_id = 44966
+client_secret = "9dwXB8wLHmqCqBaInPbkdlAPIx9sbHdJEiLWDNuK"
+callback_url = "http://localhost:8000"
 scopes = [Scope.PUBLIC, Scope.FORUM_WRITE]
 api = Ossapi(client_id, client_secret, callback_url, scopes=scopes)
 
@@ -40,9 +40,9 @@ def update_leaderboard(db):
     for rank, (uid, user) in enumerate(sorted_users, start=1):
         color = rank_colors.get(rank)
         if color:
-            lines.append(f"[color={color}]{rank}. {user['username']} - {user['balance']} OT bucks[/color]")
+            lines.append(f"[color={color}]{rank}. {user['username']} — {user['balance']} OT bucks[/color]")
         else:
-            lines.append(f"{rank}. {user['username']} - {user['balance']} OT bucks")
+            lines.append(f"{rank}. {user['username']} — {user['balance']} OT bucks")
 
     lines.append("")
     lines.append(f"[i]Total OT Bucks in circulation: {total_ot_bucks}[/i]")
@@ -55,7 +55,7 @@ def update_leaderboard(db):
 def create_ledger(db):
     """Return formatted ledger boxes for all users grouped by first letter, with colored item rarities."""
 
-    # Define rarity -> color mapping
+    # Define rarity → color mapping
     rarity_colors = {
         "common": "grey",
         "rare": "lime",
@@ -84,13 +84,19 @@ def create_ledger(db):
 
         ledger_lines.append(f"[box={letter}]")
         for user in sorted(grouped[letter], key=lambda u: u["username"].lower()):
-            item_texts = []
+            item_boxes = []
             for item in user.get("items", []):
-                rarity = item.get("rarity", "common").lower()
-                color = rarity_colors.get(rarity, "grey")
-                colored_name = f"[color={color}]{item['name']}[/color]"
-                item_texts.append(f"{colored_name} (#{item['stack_id']}) x{item['quantity']}")
-            items_str = ", ".join(item_texts) if item_texts else "None"
+                rarity  = item.get("rarity", "common").lower()
+                color   = rarity_colors.get(rarity, "grey")
+                history = format_item_history(item, user["username"])
+                box_title   = f"[color={color}]{item['name']}[/color] #{item['stack_id']} ×{item['quantity']}"
+                box_content = (
+                    f"{history}\n"
+                    f"item rarity: [color={color}]{rarity}[/color]"
+                )
+                item_boxes.append(f"[box={box_title}]{box_content}[/box]")
+
+            items_str = ", ".join(item_boxes) if item_boxes else "None"
 
             ledger_lines.append(f"[box={user['username']}]")
             ledger_lines.append(f"OT bucks : {user.get('balance', 0)}")
@@ -101,7 +107,29 @@ def create_ledger(db):
     return "\n".join(ledger_lines)
 
 
-# === 2.Build Recent Commands Log ===
+# === Item history formatter ===
+def format_item_history(item, current_username):
+    """
+    Render the ownership chain for a single item stack as a single line.
+    e.g.  PlayerA -> PlayerB (upgraded to rare) -> PlayerC
+    Legacy items with no history field fall back to: Unknown origin -> current_username
+    """
+    history = item.get("history")
+    if not history:
+        return f"Unknown origin -> {current_username}"
+
+    parts = []
+    for entry in history:
+        label   = entry.get("owner", "?")
+        upgrades = entry.get("upgrades", [])
+        if upgrades:
+            label += f" (upgraded to {upgrades[-1]})"
+        parts.append(label)
+
+    return " -> ".join(parts)
+
+
+# ===  Build Recent Commands Log ===
 def create_command_history():
     """Return a formatted list of the most recently executed commands (most recent first)."""
     if not COMMAND_HISTORY_PATH.exists():
@@ -170,4 +198,4 @@ def create_updated_post():
 def update_post():
     text = create_updated_post()
     api.forum_edit_post(post_id=POST_ID, body=text)
-    print("Forum post updated successfully.")
+    print("✅ Forum post updated successfully.")
