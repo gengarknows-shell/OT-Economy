@@ -1,6 +1,7 @@
 import re
 import json
 import time
+import copy
 from pathlib import Path
 import API
 from API import get_username
@@ -93,7 +94,8 @@ def register_user(db, user_id, username):
             "username": username,
             "balance": 100,
             "items": [],
-            "time_since_last_post": time.time()
+            "time_since_last_post": time.time(),
+            "recent_post_times": []
         }
         save_db(db)
         print(f"✅ Registered {username} ({user_id})")
@@ -161,13 +163,14 @@ def check_post_for_commands(postList):
             for line in dequoted_text.split("\n"):
                 for match in re.finditer(pattern, line, flags=re.IGNORECASE):
                     args = [arg for arg in match.groups() if arg is not None]
-                    args = [arg[1:-1] if arg != '' and arg[0] in "'\"" else arg for arg in args]  # Remove '' and "" around string args
+                    # Strip surrounding ' or " from quoted string arguments
+                    args = [arg[1:-1] if arg and arg[0] in "'\"" else arg for arg in args]
                     command_queue.append({
                         "post_id": post.get("id"),
                         "topic_id": post.get("topic_id"),
                         "user_id": post.get("user_id"),
                         "command": handler.__name__,
-                        "username": "",#.join(API.get_username(post.get("user_id")).split()),
+                        "username": "".join(API.get_username(post.get("user_id")).split()),
                         "args": args,
                         "raw": match.group(0).strip(),
                         "handler": handler
@@ -258,7 +261,8 @@ def cmd_item_create(args, user_id, username, topic_id=None):
         "name": item_name,
         "quantity": qty,
         "rarity": "common",
-        "stack_id": stack_id
+        "stack_id": stack_id,
+        "history": [{"owner": username, "upgrades": []}]
     })
     save_db(db)
     print(f"✅ Created {qty}x {item_name} (stack {stack_id}) for {username}")
@@ -266,8 +270,33 @@ def cmd_item_create(args, user_id, username, topic_id=None):
 
 
 def cmd_item_give(args, user_id, username, topic_id=None):
-    item_name, target, *stack_arg = args
-    stack_id = stack_arg[0] if stack_arg else None
+    """
+    !item give {item_name} {target} [stack_id [quantity]]
+
+    Transfers an item to another user, updating ownership history.
+    If quantity is less than the stack size the stack is split; the transferred
+    portion keeps the same stack_id and inherits the full history up to this point.
+    If the recipient already holds a stack with the same name and stack_id the
+    quantities are simply merged.
+    """
+    if len(args) < 2:
+        print("⚠️ Usage: !item give {item_name} {target} [stack_id [quantity]]")
+        return False
+
+    item_name = args[0]
+    target    = args[1]
+    stack_id  = args[2] if len(args) > 2 else None
+
+    try:
+        quantity = int(args[3]) if len(args) > 3 else None
+    except ValueError:
+        print("⚠️ Quantity must be a whole number.")
+        return False
+
+    if quantity is not None and quantity <= 0:
+        print("⚠️ Quantity must be at least 1.")
+        return False
+
     db = load_db()
     sender = db.get(str(user_id))
     if not sender:
@@ -288,11 +317,59 @@ def cmd_item_give(args, user_id, username, topic_id=None):
         print("⚠️ Item not found in your inventory.")
         return False
 
-    sender["items"].remove(match)
-    recipient = db[str(target_id)]
-    recipient["items"].append(match)
+    give_qty = quantity if quantity is not None else match["quantity"]
+    if give_qty > match["quantity"]:
+        print(f"⚠️ You only have {match['quantity']}x {match['name']} in that stack.")
+        return False
+
+    recipient          = db[str(target_id)]
+    recipient_username = recipient["username"]
+
+    # Ensure sender's item has a history (legacy support)
+    if not match.get("history"):
+        match["history"] = [{"owner": username, "upgrades": []}]
+
+    # Helper: find an existing stack in recipient's inventory with the same lineage
+    def find_existing(items, name, sid):
+        return next(
+            (it for it in items
+             if it["name"].lower() == name.lower() and it["stack_id"] == sid),
+            None
+        )
+
+    if give_qty == match["quantity"]:
+        # ── Full stack transfer ──────────────────────────────────────────────
+        match["history"].append({"owner": recipient_username, "upgrades": []})
+        sender["items"].remove(match)
+
+        existing = find_existing(recipient["items"], match["name"], match["stack_id"])
+        if existing:
+            # Recipient already holds part of this lineage — merge quantity only
+            existing["quantity"] += give_qty
+        else:
+            recipient["items"].append(match)
+
+    else:
+        # ── Partial transfer — split the stack ───────────────────────────────
+        match["quantity"] -= give_qty
+
+        transferred_history = copy.deepcopy(match["history"])
+        transferred_history.append({"owner": recipient_username, "upgrades": []})
+
+        existing = find_existing(recipient["items"], match["name"], match["stack_id"])
+        if existing:
+            existing["quantity"] += give_qty
+        else:
+            recipient["items"].append({
+                "name":     match["name"],
+                "quantity": give_qty,
+                "rarity":   match["rarity"],
+                "stack_id": match["stack_id"],
+                "history":  transferred_history,
+            })
+
     save_db(db)
-    print(f"✅ Gave {match['quantity']}x {item_name} to {recipient['username']}")
+    print(f"✅ Gave {give_qty}x {match['name']} (#{match['stack_id']}) to {recipient_username}")
     return True
 
 def cmd_item_delete(args, user_id, username, topic_id=None):
@@ -351,10 +428,22 @@ def cmd_item_upgrade(args, user_id, username, topic_id=None):
                 return False
             user["balance"] -= cost
             item["rarity"] = new_rarity
+
+            # Record upgrade in ownership history
+            if not item.get("history"):
+                item["history"] = [{"owner": username, "upgrades": [new_rarity]}]
+            else:
+                last = item["history"][-1]
+                if last["owner"].lower() == username.lower():
+                    last.setdefault("upgrades", []).append(new_rarity)
+                else:
+                    item["history"].append({"owner": username, "upgrades": [new_rarity]})
+
             save_db(db)
             print(f"✅ Upgraded {item_name} (stack {stack_id}) to {new_rarity} rarity.")
             return True
     print("⚠️ Item not found.")
+    return False
 
 
 def cmd_invest(args, user_id, username, topic_id=None):
@@ -439,17 +528,23 @@ def cmd_invest(args, user_id, username, topic_id=None):
 
 
 # === COMMAND REGEX ===
-UINT_REGEX = r"(\d+)"  # regex taking a positive number or 0
-STR_REGEX = r"((?:\")[^\"\v\f\r]+(?:\")|(?:')[^\'\v\f\r]+(?:')|[^\s\"']\S*)"  # regex allowing a single word or single-line between '' and ""
-COMMANDS: list[tuple[str, str]] = [  # replaced handlers by None to avoid API calls
-    (r"^\s*!register\s*$", "cmd_register"),
-    (r"^\s*!give\s+" + UINT_REGEX + r"\s+" + STR_REGEX + r"\s*$", "cmd_give"),
-    (r"^\s*!item\s+create\s+" + STR_REGEX + r"(?:\s+" + UINT_REGEX + r")?\s*$", "cmd_item_create"),
-    (r"^\s*!item\s+give\s+" + STR_REGEX + r"\s+" + STR_REGEX + r"(?:\s+" + UINT_REGEX + r")?\s*$", "cmd_item_give"),
-    (r"^\s*!item\s+delete\s+" + STR_REGEX + r"\s+" + UINT_REGEX + r"(?:\s+" + UINT_REGEX + r")?\s*$", "cmd_item_delete"),
-    (r"^\s*!item\s+upgrade\s+rarity\s+" + STR_REGEX + r"\s+" + UINT_REGEX + r"(?:\s+" + UINT_REGEX + r")?\s*$", "cmd_item_upgrade"),
-    (r"^\s*!invest\s+" + UINT_REGEX + r"\s+" + UINT_REGEX + r"\s+" + UINT_REGEX+ r"\s*$", "cmd_invest"),
+# UINT_REGEX  — captures a non-negative integer
+# STR_REGEX   — captures either a quoted string ('...' or "...") allowing spaces,
+#               or a plain single word (min 1 char, must not start with a quote).
+#               The [^\s\"'] first-char class prevents whitespace and mismatched quotes.
+UINT_REGEX = r"(\d+)"
+STR_REGEX  = r"((?:\")[^\"\v\f\r]+(?:\")|(?:')[^\'\v\f\r]+(?:')|[^\s\"']\S*)"
+
+COMMANDS = [
+    (r"^\s*!register\s*$",                                                                                          cmd_register),
+    (r"^\s*!give\s+"          + UINT_REGEX + r"\s+" + STR_REGEX + r"\s*$",                                         cmd_give),
+    (r"^\s*!item\s+create\s+" + STR_REGEX  + r"(?:\s+" + UINT_REGEX + r")?\s*$",                                   cmd_item_create),
+    (r"^\s*!item\s+give\s+"   + STR_REGEX  + r"\s+" + STR_REGEX + r"(?:\s+" + UINT_REGEX + r"(?:\s+" + UINT_REGEX + r")?)?\s*$",              cmd_item_give),
+    (r"^\s*!item\s+delete\s+" + STR_REGEX  + r"\s+" + UINT_REGEX + r"(?:\s+" + UINT_REGEX + r")?\s*$",             cmd_item_delete),
+    (r"^\s*!item\s+upgrade\s+rarity\s+" + STR_REGEX + r"\s+" + UINT_REGEX + r"(?:\s+" + UINT_REGEX + r")?\s*$",   cmd_item_upgrade),
+    (r"^\s*!invest\s+"        + UINT_REGEX + r"\s+" + UINT_REGEX + r"\s+" + UINT_REGEX + r"\s*$",                  cmd_invest),
 ]
+
 
 # === QUEUE PROCESSING ===
 def process_command_queue(queue):
