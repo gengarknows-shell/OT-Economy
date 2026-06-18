@@ -35,21 +35,21 @@ def get_cached_token():
 
 def refresh_access_token():
     if not os.path.exists(TOKEN_CACHE_FILE):
-        raise RuntimeError("Missing osu_token_cache.json - run getauth.py first.")
+        raise RuntimeError("Missing osu_token_cache.json — run getauth.py first.")
     
     with open(TOKEN_CACHE_FILE, "r") as f:
         token_data = json.load(f)
 
     refresh_token = token_data.get("refresh_token")
     if not refresh_token:
-        raise RuntimeError("Missing refresh_token in cache - re-run getauth.py")
+        raise RuntimeError("Missing refresh_token in cache — re-run getauth.py")
 
     data = {
         "client_id": client_id,
         "client_secret": client_secret,
         "grant_type": "refresh_token",
         "refresh_token": refresh_token,
-        "redirect_uri": "http://localhost:8727"
+        "redirect_uri": "http://localhost:8000"
     }
 
     resp = requests.post(OSU_TOKEN_URL, data=data)
@@ -61,7 +61,7 @@ def refresh_access_token():
     with open(TOKEN_CACHE_FILE, "w") as f:
         json.dump(new_data, f, indent=4)
     
-    print("Token refreshed successfully!")
+    print("🔁 Token refreshed successfully!")
     return new_data["access_token"]
 
 
@@ -93,7 +93,7 @@ def get_access_token():
     try:
         return refresh_access_token()
     except Exception as e:
-        print("Could not refresh token, requesting new one:", e)
+        print("⚠️ Could not refresh token, requesting new one:", e)
         return request_new_token()
 
 def get_forum_data(forum_id, access_token):
@@ -211,7 +211,6 @@ def check_new_posts():
 
 def get_username(userid):
     return api.user(user=userid,key="id").username
-
 
 
 
