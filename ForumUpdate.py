@@ -14,11 +14,13 @@ api    = Ossapi(CLIENT_ID, CLIENT_SECRET, REDIRECT_URI, scopes = scopes)
 # === Local DB ===
 DB_PATH = Path("database.json")
 COMMAND_HISTORY_PATH = Path("command_history.json")
+INVESTMENTS_PATH = Path("investments.json")
+SNAPSHOT_PATH = Path("balance_snapshot.json")
 POST_ID = 10010331   # post you want to update
 
-# === Build Leaderboard ===
+# ===  Build Leaderboard ===
 def update_leaderboard(db):
-    """Return a formatted leaderboard showing the top 10 richest users with colored ranks and total economy size."""
+    """Return a formatted leaderboard showing the top 10 richest users with colored ranks and economy statistics."""
     # Sort users by OT bucks (balance)
     sorted_users = sorted(
         db.items(),
@@ -28,14 +30,88 @@ def update_leaderboard(db):
 
     # Colors for top ranks
     rank_colors = {
-        1: "gold",     
-        2: "silver",   
-        3: "#cd7f32"   # (bronze)
+        1: "gold",     # 
+        2: "silver",   # 
+        3: "#cd7f32"   #  (bronze)
     }
 
-    # Calculate total OT bucks in circulation
+    # --- Stat 1: Total + average OT bucks ---
     total_ot_bucks = sum(user.get("balance", 0) for user in db.values())
+    user_count = len(db)
+    avg_bucks = round(total_ot_bucks / user_count) if user_count > 0 else 0
 
+    # --- Stat 2: Investment success rate (last 2 weeks) ---
+    two_weeks_ago = time.time() - (14 * 24 * 3600)
+    success_count = 0
+    resolved_count = 0
+    if INVESTMENTS_PATH.exists():
+        with open(INVESTMENTS_PATH, "r") as f:
+            try:
+                investments = json.load(f)
+            except json.JSONDecodeError:
+                investments = []
+        for inv in investments:
+            if inv.get("status") in ("success", "failed"):
+                if inv.get("resolved_at", 0) >= two_weeks_ago:
+                    resolved_count += 1
+                    if inv["status"] == "success":
+                        success_count += 1
+
+    if resolved_count > 0:
+        success_pct = round(success_count / resolved_count * 100)
+        success_str = f"{success_pct}% ({success_count}/{resolved_count} investments)"
+    else:
+        success_str = "No resolved investments in the last 2 weeks"
+
+    # --- Stat 3: Richest gains this week (vs weekly balance snapshot) ---
+    top_gainer_str = "No snapshot yet — gains will appear after the first weekly tick"
+    if SNAPSHOT_PATH.exists():
+        with open(SNAPSHOT_PATH, "r") as f:
+            try:
+                snapshot = json.load(f)
+            except json.JSONDecodeError:
+                snapshot = {}
+        snapshot_balances = snapshot.get("balances", {})
+        best_uid, best_gain = None, None
+        for uid, user in db.items():
+            prev = snapshot_balances.get(uid, 0)  # new users had 0 last week
+            gain = user.get("balance", 0) - prev
+            if best_gain is None or gain > best_gain:
+                best_gain = gain
+                best_uid = uid
+        if best_uid is not None:
+            name = db[best_uid]["username"]
+            sign = f"+{best_gain}" if best_gain >= 0 else str(best_gain)
+            top_gainer_str = f"{name} ({sign} OT Bucks)"
+
+    # --- Stat 4: Item rarity distribution ---
+    rarity_colors = {
+        "common": "grey", "rare": "lime", "exotic": "cyan",
+        "legendary": "red", "sacred": "gold",
+    }
+    rarity_counts = {r: 0 for r in rarity_colors}
+    total_items = 0
+    for user in db.values():
+        for item in user.get("items", []):
+            r = item.get("rarity", "common").lower()
+            if r in rarity_counts:
+                rarity_counts[r] += 1
+            else:
+                rarity_counts[r] = rarity_counts.get(r, 0) + 1
+            total_items += 1
+
+    if total_items > 0:
+        parts = []
+        for r, color in rarity_colors.items():
+            count = rarity_counts.get(r, 0)
+            if count:
+                pct = round(count / total_items * 100)
+                parts.append(f"[color={color}]{r}: {count} ({pct}%)[/color]")
+        rarity_str = " | ".join(parts) if parts else "None"
+    else:
+        rarity_str = "No items in circulation"
+
+    # --- Assemble output ---
     lines = ["[centre][b]OT!Economy Richest Users:[/b][/centre]"]
     for rank, (uid, user) in enumerate(sorted_users, start=1):
         color = rank_colors.get(rank)
@@ -46,12 +122,16 @@ def update_leaderboard(db):
 
     lines.append("")
     lines.append(f"[i]Total OT Bucks in circulation: {total_ot_bucks}[/i]")
+    lines.append(f"[box=[b]More Stats:[/b]][i]Average OT Bucks per user: {avg_bucks}[/i]")
+    lines.append(f"[i]Investment success rate (last 2 weeks): {success_str}[/i]")
+    lines.append(f"[i]Richest gains this week: {top_gainer_str}[/i]")
+    lines.append(f"[i]Item rarity distribution: {rarity_str}[/i][/box]")
 
     return "\n".join(lines)
 
 
 
-# === Build Ledger (A–Z boxes) ===
+# ===  Build Ledger (A–Z boxes) ===
 def create_ledger(db):
     """Return formatted ledger boxes for all users grouped by first letter, with colored item rarities."""
 
@@ -129,7 +209,7 @@ def format_item_history(item, current_username):
     return " -> ".join(parts)
 
 
-# ===  Build Recent Commands Log ===
+# === 2. Build Recent Commands Log ===
 def create_command_history():
     """Return a formatted list of the most recently executed commands (most recent first)."""
     if not COMMAND_HISTORY_PATH.exists():
@@ -158,7 +238,7 @@ def create_command_history():
     return "\n".join(lines)
 
 
-# === Combine Everything ===
+# ===  Combine Everything ===
 from pathlib import Path
 import json
 
@@ -194,7 +274,7 @@ def create_updated_post():
 
 
 
-# === Upload the post ===
+# ===  Upload the post ===
 def update_post():
     text = create_updated_post()
     api.forum_edit_post(post_id=POST_ID, body=text)
