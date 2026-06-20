@@ -7,9 +7,21 @@ from pathlib import Path
 DB_PATH = Path("database.json")
 INTRO_PATH = Path("post_intro.txt")
 STATE_PATH = Path("bot_state.json")
+SNAPSHOT_PATH = Path("balance_snapshot.json")
 TICKS_PER_WEEK = 40320
 TAX_RATE = 0.03
 TAX_THRESHOLD = 10000
+
+
+def save_balance_snapshot(db):
+    """Persist current balances as the weekly baseline for gains tracking in the leaderboard."""
+    snapshot = {
+        "saved_at": time.time(),
+        "balances": {uid: user.get("balance", 0) for uid, user in db.items()},
+    }
+    with open(SNAPSHOT_PATH, "w") as f:
+        json.dump(snapshot, f, indent=4)
+    print("📸 Weekly balance snapshot saved.")
 
 
 
@@ -54,13 +66,16 @@ def apply_wealth_tax_tick_based(current_tick):
             tax_amount = round(balance * TAX_RATE)
             user["balance"] -= tax_amount
             taxed_users.append((user["username"], tax_amount))
-            print(f"💸 Wealth tax: {user['username']} paid {tax_amount} OT Bucks (3%)")
+            print(f" Wealth tax: {user['username']} paid {tax_amount} OT Bucks (3%)")
 
     if taxed_users:
         save_db(db)
         print(f"✅ Applied wealth tax to {len(taxed_users)} users this week.")
     else:
-        print("💤 No users eligible for wealth tax this week.")
+        print(" No users eligible for wealth tax this week.")
+
+    # Snapshot after tax so week-over-week gains comparisons are always fair
+    save_balance_snapshot(db)
 
 
 def calculate_reward_probability(seconds_since_last_post, tau=7200):
@@ -83,14 +98,14 @@ def maybe_reward_user(user_id):
     db = load_db()
     user = db.get(str(user_id))
     if not user:
-        print("⚠️ User not found.")
+        print(" User not found.")
         return None
 
     now = time.time()
     last_post_time = user.get("time_since_last_post", 0)
     time_diff = now - last_post_time
 
-    # === 1️Base reward probability (unchanged)
+    # ===  Base reward probability (unchanged)
     base_probability = calculate_reward_probability(time_diff)
 
     # ===  Rarity-based boosts
@@ -118,7 +133,7 @@ def maybe_reward_user(user_id):
     total_reward_boost = sum(rarity_boosts.get(it["rarity"], 0.0) for it in top_items)
     total_reward_boost = min(total_reward_boost, 0.60)  # +60% cap
 
-    # === Calculate Sacred-based chance boost
+    # ===  Calculate Sacred-based chance boost
     sacred_count = sum(1 for it in top_items if it.get("rarity") == "sacred")
     sacred_chance_boost = min(sacred_count * 0.15, 0.75)  # +15% per Sacred, up to +75%
     final_probability = base_probability * (1 + sacred_chance_boost)
@@ -133,7 +148,7 @@ def maybe_reward_user(user_id):
     spam_penalty = 1.0 / (n ** SPAM_BETA)
     final_probability *= spam_penalty
 
-    # ===  Reward roll
+    # === Reward roll
     recent_times.append(now)   # always record the post, win or lose
     if random.random() < final_probability:
         base_reward = random.randint(5, 25)
@@ -143,7 +158,7 @@ def maybe_reward_user(user_id):
         user["recent_post_times"] = recent_times
         save_db(db)
         print(
-            f"🎁 {user['username']} received {boosted_reward} OT Bucks "
+            f" {user['username']} received {boosted_reward} OT Bucks "
             f"(base={base_reward}, +{total_reward_boost*100:.1f}% reward boost, "
             f"chance +{sacred_chance_boost*100:.1f}% sacred, "
             f"spam ×{spam_penalty:.2f} [n={n} in window])"
@@ -154,7 +169,7 @@ def maybe_reward_user(user_id):
         user["recent_post_times"] = recent_times
         save_db(db)
         print(
-            f"🕒 {user['username']} got no reward "
+            f" {user['username']} got no reward "
             f"(p={final_probability:.4f}, sacred +{sacred_chance_boost*100:.1f}%, "
             f"spam ×{spam_penalty:.2f} [n={n} in window])"
         )
@@ -198,7 +213,7 @@ def tick_loop():
             #  Check for new posts
             new_posts_per_topic = check_new_posts()
 
-            #  Process rewards + commands as usual
+            # Process rewards + commands as usual
             for topic_posts in new_posts_per_topic:
                 for post in topic_posts:
                     reward = maybe_reward_user(post["user_id"])
@@ -223,7 +238,7 @@ def tick_loop():
             if new_db != prev_db:
                 state_changed = True
 
-            #  Only update the forum if something changed
+            # Only update the forum if something changed
             if state_changed:
                 print("🪶 Updating forum post (changes detected)...")
                 update_post()
