@@ -6,9 +6,10 @@ import time
 
 client_id = 
 client_secret = ""
-callback_url = "http://localhost:8727"
-scopes = [Scope.PUBLIC, Scope.FORUM_WRITE]
-api = Ossapi(client_id,client_secret,callback_url,scopes=scopes)
+# No callback_url → client credentials flow. API.py only does reads
+# (forum_topic, user) so FORUM_WRITE and a local OAuth server are
+# never needed here. ForumUpdate.py owns the write-capable api instance.
+api = Ossapi(client_id, client_secret)
 
 
 
@@ -152,7 +153,7 @@ def check_new_posts():
                 previous_data = {}
 
     forum_data = get_forum_data(FORUM_ID, access_token)
-    topics = forum_data.get("topics", [])
+    topics = forum_data.get("pinned_topics", []) + forum_data.get("topics", [])
 
     new_posts_per_topic = []
     current_data = {}
@@ -161,7 +162,9 @@ def check_new_posts():
     for topic in topics:
         topic_id = str(topic["id"])
         prev_post_ids = previous_data.get(topic_id, [])
-        if first_run or len(prev_post_ids) < topic["post_count"]:
+        latest_known = prev_post_ids[0] if prev_post_ids else None
+        latest_on_forum = str(topic.get("last_post_id", ""))
+        if first_run or latest_known != latest_on_forum:
             topics_to_fetch.append(topic_id)
         else:
             current_data[topic_id] = prev_post_ids
@@ -187,6 +190,11 @@ def check_new_posts():
             topic_id = future_to_topic[future]
             posts = future.result()
             if not posts:
+                # Preserve the last known post IDs so topic_data.dat stays
+                # complete. Without this, the topic vanishes from current_data,
+                # the next run treats every post as new, and old commands fire again.
+                if topic_id in previous_data:
+                    current_data[topic_id] = previous_data[topic_id]
                 continue
 
             post_ids = [str(post.id) for post in posts]
